@@ -1,6 +1,6 @@
-//! Забирает .ics-ленту Moodle и создаёт/обновляет в календаре Nextcloud
-//! соответствующие задачи (VTODO). Статус выполнения, поставленный в клиенте
-//! (Calino и т.д.), не затирается: синхронизируются только поля SYNC_KEYS.
+//! Fetches Moodle's .ics feed and creates/updates the corresponding tasks
+//! (VTODO) in the Nextcloud calendar. Completion status set in the client
+//! (Calino, etc.) is not overwritten: only the SYNC_KEYS fields are synced.
 
 use std::{env, fs, thread, time::Duration};
 
@@ -8,8 +8,8 @@ use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
 
-/// Поля, которые берутся из Moodle. Всё остальное в задаче (STATUS, COMPLETED,
-/// PERCENT-COMPLETE, ...) остаётся как есть.
+/// Fields taken from Moodle. Everything else in the task (STATUS, COMPLETED,
+/// PERCENT-COMPLETE, ...) is left untouched.
 const SYNC_KEYS: [&str; 5] = ["SUMMARY", "DESCRIPTION", "DUE", "CATEGORIES", "URL"];
 
 struct Config {
@@ -26,7 +26,7 @@ enum Outcome {
 }
 
 fn env_req(name: &str) -> Result<String> {
-    env::var(name).with_context(|| format!("не задана переменная окружения {name}"))
+    env::var(name).with_context(|| format!("environment variable {name} is not set"))
 }
 
 fn env_true(name: &str) -> bool {
@@ -36,9 +36,9 @@ fn env_true(name: &str) -> bool {
     )
 }
 
-// ---------- минимальная работа с iCalendar ----------
+// ---------- minimal iCalendar handling ----------
 
-/// Разворачивает "сложенные" строки (продолжение начинается с пробела/табуляции).
+/// Unfolds "folded" lines (a continuation starts with a space/tab).
 fn unfold(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in text.split('\n') {
@@ -52,7 +52,7 @@ fn unfold(text: &str) -> Vec<String> {
     out
 }
 
-/// Складывает строку по 75 октетов, не разрезая UTF-8 символы.
+/// Folds a line at 75 octets without splitting UTF-8 characters.
 fn fold(line: &str) -> String {
     let mut out = String::new();
     let mut len = 0usize;
@@ -77,7 +77,7 @@ fn serialize(lines: &[String]) -> String {
     s
 }
 
-/// Имя свойства в верхнем регистре: всё до первого ':' или ';'.
+/// Property name in uppercase: everything before the first ':' or ';'.
 fn prop_name(line: &str) -> String {
     line.split(|c: char| c == ':' || c == ';')
         .next()
@@ -85,7 +85,7 @@ fn prop_name(line: &str) -> String {
         .to_uppercase()
 }
 
-/// Возвращает свойства каждого VEVENT (вложенные компоненты, например VALARM, пропускаются).
+/// Returns the properties of each VEVENT (nested components, e.g. VALARM, are skipped).
 fn parse_events(text: &str) -> Vec<Vec<String>> {
     let mut events = Vec::new();
     let mut cur: Option<Vec<String>> = None;
@@ -112,8 +112,8 @@ fn parse_events(text: &str) -> Vec<Vec<String>> {
     events
 }
 
-/// Из VEVENT строит UID и набор строк-свойств для VTODO.
-/// DUE берётся из DTEND (или DTSTART, если DTEND нет).
+/// Builds the UID and the set of property lines for VTODO from a VEVENT.
+/// DUE is taken from DTEND (or DTSTART if DTEND is absent).
 fn todo_props(ev: &[String]) -> Result<(String, Vec<String>)> {
     let uid = ev
         .iter()
@@ -121,7 +121,7 @@ fn todo_props(ev: &[String]) -> Result<(String, Vec<String>)> {
         .and_then(|l| l.split_once(':'))
         .map(|(_, v)| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .context("у события нет UID")?;
+        .context("event has no UID")?;
 
     let mut props: Vec<String> = ev
         .iter()
@@ -161,7 +161,7 @@ fn new_todo(uid: &str, props: &[String]) -> String {
     serialize(&lines)
 }
 
-/// Индексы строк SYNC_KEYS, лежащих непосредственно в VTODO (не во вложенном VALARM).
+/// Indices of SYNC_KEYS lines located directly in VTODO (not in a nested VALARM).
 fn sync_indices(lines: &[String]) -> Vec<usize> {
     let mut idx = Vec::new();
     let mut in_todo = false;
@@ -189,8 +189,8 @@ fn sync_indices(lines: &[String]) -> Vec<usize> {
     idx
 }
 
-/// Подставляет свежие SYNC-поля в существующую задачу.
-/// Возвращает None, если менять нечего.
+/// Substitutes fresh SYNC fields into an existing task.
+/// Returns None if there is nothing to change.
 fn merge(body: &str, props: &[String]) -> Option<String> {
     let lines = unfold(body);
     let idx = sync_indices(&lines);
@@ -307,7 +307,7 @@ fn sync_once(moodle: &Client, nc: &Client, cfg: &Config) -> Result<()> {
             Ok(Outcome::Unchanged) => unchanged += 1,
             Err(e) => {
                 errors += 1;
-                eprintln!("ошибка: {e:#}");
+                eprintln!("error: {e:#}");
             }
         }
     }
@@ -333,7 +333,7 @@ fn main() -> Result<()> {
         b = b.danger_accept_invalid_certs(true);
     }
     if let Ok(path) = env::var("NC_CA_FILE") {
-        let pem = fs::read(&path).with_context(|| format!("не удалось прочитать {path}"))?;
+        let pem = fs::read(&path).with_context(|| format!("failed to read {path}"))?;
         b = b.add_root_certificate(reqwest::Certificate::from_pem(&pem)?);
     }
     let nc = b.build()?;
@@ -347,7 +347,7 @@ fn main() -> Result<()> {
     };
     loop {
         if let Err(e) = sync_once(&moodle, &nc, &cfg) {
-            eprintln!("ошибка синхронизации: {e:#}");
+            eprintln!("sync error: {e:#}");
         }
         thread::sleep(Duration::from_secs(secs));
     }
